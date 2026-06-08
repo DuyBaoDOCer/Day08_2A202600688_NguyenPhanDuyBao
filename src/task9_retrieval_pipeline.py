@@ -24,7 +24,7 @@ from .task8_pageindex_vectorless import pageindex_search
 
 SCORE_THRESHOLD = 0.3   # Nếu best score < threshold → fallback PageIndex
 DEFAULT_TOP_K = 5
-RERANK_METHOD = "cross_encoder"  # "cross_encoder" | "mmr" | "rrf"
+RERANK_METHOD = "rrf"  # "cross_encoder" | "mmr" | "rrf"
 
 
 def retrieve(
@@ -61,32 +61,75 @@ def retrieve(
             'source': str  # 'hybrid' hoặc 'pageindex'
         }
     """
-    # TODO: Implement full retrieval pipeline
-    #
-    # Step 1: Song song chạy semantic + lexical
-    # dense_results = semantic_search(query, top_k=top_k * 2)
-    # sparse_results = lexical_search(query, top_k=top_k * 2)
-    #
-    # Step 2: Merge bằng RRF
-    # merged = rerank_rrf([dense_results, sparse_results], top_k=top_k * 2)
-    # for item in merged:
-    #     item["source"] = "hybrid"
-    #
-    # Step 3: Rerank
-    # if use_reranking and merged:
-    #     final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
-    # else:
-    #     final_results = merged[:top_k]
-    #
-    # Step 4: Check threshold → fallback
-    # if not final_results or final_results[0]["score"] < score_threshold:
-    #     print(f"  ⚠ Hybrid score ({final_results[0]['score']:.3f} if final_results else 0}) "
-    #           f"< threshold ({score_threshold}). Fallback → PageIndex")
-    #     fallback = pageindex_search(query, top_k=top_k)
-    #     return fallback
-    #
-    # return final_results[:top_k]
-    raise NotImplementedError("Implement retrieve")
+    # ------------------------------------------------------------------ #
+    # Step 1: Chạy song song semantic search + lexical search             #
+    # ------------------------------------------------------------------ #
+    fetch_k = top_k * 3  # Lấy nhiều hơn để sau rerank còn đủ candidates
+
+    dense_results: list[dict] = []
+    sparse_results: list[dict] = []
+
+    try:
+        dense_results = semantic_search(query, top_k=fetch_k)
+    except Exception as e:
+        print(f"  [!] Semantic search failed: {e}")
+
+    try:
+        sparse_results = lexical_search(query, top_k=fetch_k)
+    except Exception as e:
+        print(f"  [!] Lexical search failed: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Step 2: Merge bằng Reciprocal Rank Fusion (RRF)                    #
+    # ------------------------------------------------------------------ #
+    all_lists = [lst for lst in [dense_results, sparse_results] if lst]
+    if all_lists:
+        merged = rerank_rrf(all_lists, top_k=fetch_k)
+    else:
+        merged = []
+
+    # Gán source = "hybrid" cho tất cả kết quả sau merge
+    for item in merged:
+        item["source"] = "hybrid"
+
+    # ------------------------------------------------------------------ #
+    # Step 3: Rerank candidates                                           #
+    # ------------------------------------------------------------------ #
+    if use_reranking and merged:
+        try:
+            final_results = rerank(query, merged, top_k=top_k, method=RERANK_METHOD)
+            # Đảm bảo source vẫn là "hybrid" sau rerank (rerank có thể copy metadata)
+            for item in final_results:
+                item.setdefault("source", "hybrid")
+        except Exception as e:
+            print(f"  [!] Reranking failed ({e}), using RRF-merged results.")
+            final_results = merged[:top_k]
+    else:
+        final_results = merged[:top_k]
+
+    # ------------------------------------------------------------------ #
+    # Step 4: Kiểm tra threshold → fallback sang PageIndex               #
+    # ------------------------------------------------------------------ #
+    best_score = final_results[0]["score"] if final_results else 0.0
+
+    if not final_results or best_score < score_threshold:
+        print(
+            f"  ⚠ Hybrid best score ({best_score:.3f}) < threshold ({score_threshold}). "
+            f"Fallback → PageIndex vectorless search."
+        )
+        try:
+            fallback = pageindex_search(query, top_k=top_k)
+            if fallback:
+                return fallback
+        except Exception as e:
+            print(f"  [!] PageIndex fallback failed: {e}")
+        # Nếu PageIndex cũng thất bại, trả về kết quả hybrid (dù thấp điểm)
+        return final_results
+
+    # ------------------------------------------------------------------ #
+    # Step 5: Trả về top_k kết quả                                       #
+    # ------------------------------------------------------------------ #
+    return final_results[:top_k]
 
 
 if __name__ == "__main__":
